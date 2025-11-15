@@ -628,7 +628,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   _playerPrefab:
-    RawGuidValue: 53fc73bb5f1b2614890d4d3de44a509e
+    RawGuidValue: 11aaea5348574644a9eb4f4504fcce3f
   mainCamera: {fileID: 344607137}
   cameraAnchorName: CameraAnchor
   weaponIndicator: {fileID: 1235511563}
