@@ -6,6 +6,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using TMPro; // TextMeshPro
 
 public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
 {
@@ -17,10 +18,23 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
     [Header("Optional: name of child transform inside the player to parent the camera to (case-insensitive)")]
     [SerializeField] private string cameraAnchorName = "CameraAnchor";
 
+    [Header("UI (optional)")]
+    [SerializeField] private TMP_Text weaponIndicator;            // assign your TMP UI text here
+    [SerializeField] private string weaponIndicatorPrefix = "Weapon: ";
+
     // server-side spawned tracking
     private Dictionary<PlayerRef, NetworkObject> _spawnedCharacters = new Dictionary<PlayerRef, NetworkObject>();
 
     private NetworkRunner _runner;
+
+    // ---------- Input state & weapon selection (single definitions) ----------
+    private bool _mouseButton0;
+    private bool _mouseButton1;
+    private int _localSelectedWeapon = 0; // 0 = Ball, 1 = PhysxBall
+    private int _lastDisplayedWeapon = -1; // for UI change detection
+
+    // weapon names (display)
+private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBall", "LobbedBall" };
 
     // ---------- Fusion callbacks ----------
     public void OnPlayerJoined(NetworkRunner runner, PlayerRef player)
@@ -51,35 +65,60 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
         }
     }
 
-    // ---------- Input boilerplate ----------
-    private bool _mouseButton0;
-    private bool _mouseButton1;
-
+    // ---------- Unity Update: polling input & local selection ----------
     private void Update()
     {
-        _mouseButton0 = _mouseButton0 || Input.GetMouseButton(0);
-        _mouseButton1 = _mouseButton1 || Input.GetMouseButton(1);
+        // Edge detection caching for mouse clicks — set to true if pressed this frame
+        if (Input.GetMouseButtonDown(0)) _mouseButton0 = true;
+        if (Input.GetMouseButtonDown(1)) _mouseButton1 = true;
+
+        // Scroll wheel selection (local only). Up -> next, Down -> previous
+        float scroll = Input.mouseScrollDelta.y;
+        if (scroll > 0f)
+        {
+            _localSelectedWeapon = (_localSelectedWeapon + 1) % _weaponNames.Length;
+            Debug.Log($"[BasicSpawner] Selected weapon -> {_localSelectedWeapon} ({_weaponNames[_localSelectedWeapon]})");
+            UpdateWeaponIndicator();
+        }
+        else if (scroll < 0f)
+        {
+            _localSelectedWeapon = (_localSelectedWeapon - 1 + _weaponNames.Length) % _weaponNames.Length;
+            Debug.Log($"[BasicSpawner] Selected weapon -> {_localSelectedWeapon} ({_weaponNames[_localSelectedWeapon]})");
+            UpdateWeaponIndicator();
+        }
+
+        // Ensure UI shows initial value if not yet set
+        if (_lastDisplayedWeapon != _localSelectedWeapon)
+            UpdateWeaponIndicator();
     }
 
+    // ---------- Pack input for Fusion every tick ----------
     public void OnInput(NetworkRunner runner, NetworkInput input)
     {
         var data = new NetworkInputData();
 
+        // Movement keys
         if (Input.GetKey(KeyCode.W)) data.direction += Vector3.forward;
         if (Input.GetKey(KeyCode.S)) data.direction += Vector3.back;
         if (Input.GetKey(KeyCode.A)) data.direction += Vector3.left;
         if (Input.GetKey(KeyCode.D)) data.direction += Vector3.right;
 
-        data.buttons.Set(NetworkInputData.MOUSEBUTTON0, _mouseButton0);
-        _mouseButton0 = false;
+        // Buttons: set bits if local cached flags were set (edge)
+        // IMPORTANT: NetworkButtons.Set requires (byte index, bool value)
+        if (_mouseButton0) data.buttons.Set(NetworkInputData.MOUSEBUTTON0, true);
+        if (_mouseButton1) data.buttons.Set(NetworkInputData.MOUSEBUTTON1, true);
 
-        data.buttons.Set(NetworkInputData.MOUSEBUTTON1, _mouseButton1);
+        // Weapon selection included
+        data.selectedWeapon = (byte)_localSelectedWeapon;
+
+        // reset edge flags after sending to avoid repeated presses
+        _mouseButton0 = false;
         _mouseButton1 = false;
 
         input.Set(data);
     }
 
-    // other Fusion callbacks (empty implementations)
+    // ---------- Other Fusion callbacks (empty implementations) ----------
     public void OnInputMissing(NetworkRunner r, PlayerRef p, NetworkInput i) { }
     public void OnShutdown(NetworkRunner r, ShutdownReason s) { }
     public void OnConnectedToServer(NetworkRunner r) { }
@@ -129,7 +168,7 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
     // ---------- Robust camera attach coroutine ----------
     private IEnumerator AttachCameraToLocalPlayerWhenReady(NetworkRunner runner, PlayerRef player)
     {
-        float timeout = 10f;           // longer timeout for slow networks
+        float timeout = 10f;
         float elapsed = 0f;
         float pollInterval = 0.05f;
 
@@ -252,5 +291,17 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
         cam.transform.localEulerAngles = lr;
 
         Debug.Log($"[BasicSpawner] Camera '{cam.name}' attached to '{playerNetworkObject.name}' at localPos={cam.transform.localPosition}, localRot={cam.transform.localEulerAngles}");
+    }
+
+    // ---------- Helper: update HUD indicator ----------
+    private void UpdateWeaponIndicator()
+    {
+        _lastDisplayedWeapon = _localSelectedWeapon;
+
+        if (weaponIndicator != null)
+        {
+            string name = (_localSelectedWeapon >= 0 && _localSelectedWeapon < _weaponNames.Length) ? _weaponNames[_localSelectedWeapon] : "Unknown";
+            weaponIndicator.text = $"{weaponIndicatorPrefix}{name}";
+        }
     }
 }
