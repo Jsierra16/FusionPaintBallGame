@@ -4,9 +4,10 @@ using Fusion.Addons.Physics;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
-using TMPro; // TextMeshPro
+using TMPro; // optional
 
 public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
 {
@@ -21,31 +22,43 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
     [Header("UI (optional)")]
     [SerializeField] private TMP_Text weaponIndicator;            // assign your TMP UI text here
     [SerializeField] private string weaponIndicatorPrefix = "Weapon: ";
+    [SerializeField] public TMP_Text connectionStatusText;
 
     // server-side spawned tracking
     private Dictionary<PlayerRef, NetworkObject> _spawnedCharacters = new Dictionary<PlayerRef, NetworkObject>();
 
     private NetworkRunner _runner;
 
-    // ---------- Input state & weapon selection (single definitions) ----------
+    // ---------- Input state & weapon selection ----------
     private bool _mouseButton0;
     private bool _mouseButton1;
     private int _localSelectedWeapon = 0; // 0 = Ball, 1 = PhysxBall
-    private int _lastDisplayedWeapon = -1; // for UI change detection
+    private int _lastDisplayedWeapon = -1;
 
-    // weapon names (display)
-private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBall", "LobbedBall" };
+    private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBall", "LobbedBall" };
+
+    // ---------- Public UI methods (hook these to Buttons) ----------
+    /// <summary>Call this from a UI Button OnClick to start a Host session.</summary>
+    public void StartHost() => _ = StartGame(GameMode.Host);
+
+    /// <summary>Call this from a UI Button OnClick to start a Client session (join).</summary>
+    public void StartClient() => _ = StartGame(GameMode.Client);
+
+    /// <summary>Optional helper: set session name from UI.</summary>
+    public string SessionName = "TestRoom";
 
     // ---------- Fusion callbacks ----------
     public void OnPlayerJoined(NetworkRunner runner, PlayerRef player)
     {
+        Debug.Log($"[BasicSpawner] OnPlayerJoined called. runner.LocalPlayer={runner.LocalPlayer} joinedPlayer={player} runner.IsServer={runner.IsServer}");
+
         // Server spawns the networked player object
         if (runner.IsServer)
         {
             Vector3 spawnPosition = new Vector3((player.RawEncoded % 4) * 3, 1, 0);
             NetworkObject networkPlayerObject = runner.Spawn(_playerPrefab, spawnPosition, Quaternion.identity, player);
             _spawnedCharacters.Add(player, networkPlayerObject);
-            Debug.Log($"[BasicSpawner] Server spawned player for {player} -> {networkPlayerObject.name}");
+            Debug.Log($"[BasicSpawner] Server spawned player for {player} -> {networkPlayerObject.name} (InputAuth={networkPlayerObject.InputAuthority})");
         }
 
         // Attach camera only for the local client that owns this player
@@ -53,6 +66,10 @@ private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBal
         {
             Debug.Log("[BasicSpawner] Local player joined on this runner -> starting attach coroutine.");
             StartCoroutine(AttachCameraToLocalPlayerWhenReady(runner, player));
+        }
+        else
+        {
+            Debug.Log("[BasicSpawner] Not the local player on this runner - skipping camera coroutine start.");
         }
     }
 
@@ -68,26 +85,21 @@ private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBal
     // ---------- Unity Update: polling input & local selection ----------
     private void Update()
     {
-        // Edge detection caching for mouse clicks — set to true if pressed this frame
         if (Input.GetMouseButtonDown(0)) _mouseButton0 = true;
         if (Input.GetMouseButtonDown(1)) _mouseButton1 = true;
 
-        // Scroll wheel selection (local only). Up -> next, Down -> previous
         float scroll = Input.mouseScrollDelta.y;
         if (scroll > 0f)
         {
             _localSelectedWeapon = (_localSelectedWeapon + 1) % _weaponNames.Length;
-            Debug.Log($"[BasicSpawner] Selected weapon -> {_localSelectedWeapon} ({_weaponNames[_localSelectedWeapon]})");
             UpdateWeaponIndicator();
         }
         else if (scroll < 0f)
         {
             _localSelectedWeapon = (_localSelectedWeapon - 1 + _weaponNames.Length) % _weaponNames.Length;
-            Debug.Log($"[BasicSpawner] Selected weapon -> {_localSelectedWeapon} ({_weaponNames[_localSelectedWeapon]})");
             UpdateWeaponIndicator();
         }
 
-        // Ensure UI shows initial value if not yet set
         if (_lastDisplayedWeapon != _localSelectedWeapon)
             UpdateWeaponIndicator();
     }
@@ -97,21 +109,16 @@ private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBal
     {
         var data = new NetworkInputData();
 
-        // Movement keys
         if (Input.GetKey(KeyCode.W)) data.direction += Vector3.forward;
         if (Input.GetKey(KeyCode.S)) data.direction += Vector3.back;
         if (Input.GetKey(KeyCode.A)) data.direction += Vector3.left;
         if (Input.GetKey(KeyCode.D)) data.direction += Vector3.right;
 
-        // Buttons: set bits if local cached flags were set (edge)
-        // IMPORTANT: NetworkButtons.Set requires (byte index, bool value)
         if (_mouseButton0) data.buttons.Set(NetworkInputData.MOUSEBUTTON0, true);
         if (_mouseButton1) data.buttons.Set(NetworkInputData.MOUSEBUTTON1, true);
 
-        // Weapon selection included
         data.selectedWeapon = (byte)_localSelectedWeapon;
 
-        // reset edge flags after sending to avoid repeated presses
         _mouseButton0 = false;
         _mouseButton1 = false;
 
@@ -120,11 +127,11 @@ private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBal
 
     // ---------- Other Fusion callbacks (empty implementations) ----------
     public void OnInputMissing(NetworkRunner r, PlayerRef p, NetworkInput i) { }
-    public void OnShutdown(NetworkRunner r, ShutdownReason s) { }
-    public void OnConnectedToServer(NetworkRunner r) { }
-    public void OnDisconnectedFromServer(NetworkRunner r, NetDisconnectReason reason) { }
+    public void OnShutdown(NetworkRunner r, ShutdownReason s) { UpdateStatus("Shutdown"); }
+    public void OnConnectedToServer(NetworkRunner r) { UpdateStatus("ConnectedToServer"); }
+    public void OnDisconnectedFromServer(NetworkRunner r, NetDisconnectReason reason) { UpdateStatus($"Disconnected: {reason}"); }
     public void OnConnectRequest(NetworkRunner r, NetworkRunnerCallbackArgs.ConnectRequest req, byte[] token) { }
-    public void OnConnectFailed(NetworkRunner r, NetAddress remote, NetConnectFailedReason reason) { }
+    public void OnConnectFailed(NetworkRunner r, NetAddress remote, NetConnectFailedReason reason) { UpdateStatus($"ConnectFailed: {reason}"); }
     public void OnUserSimulationMessage(NetworkRunner r, SimulationMessagePtr message) { }
     public void OnSessionListUpdated(NetworkRunner r, List<SessionInfo> sessionList) { }
     public void OnCustomAuthenticationResponse(NetworkRunner r, Dictionary<string, object> data) { }
@@ -137,32 +144,45 @@ private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBal
     public void OnReliableDataProgress(NetworkRunner r, PlayerRef player, ReliableKey key, float progress) { }
 
     // ---------- Start/Host/Join ----------
-    async void StartGame(GameMode mode)
+    async Task StartGame(GameMode mode)
     {
-        _runner = gameObject.AddComponent<NetworkRunner>();
-        _runner.ProvideInput = true;
+        UpdateStatus(mode == GameMode.Host ? "Starting Host..." : "Starting Client...");
 
-        var physicsSim = gameObject.AddComponent<RunnerSimulatePhysics3D>();
+        // create runner
+        _runner = gameObject.GetComponent<NetworkRunner>();
+        if (_runner == null) _runner = gameObject.AddComponent<NetworkRunner>();
+        _runner.ProvideInput = true;
+        _runner.AddCallbacks(this);
+
+        var physicsSim = gameObject.GetComponent<RunnerSimulatePhysics3D>();
+        if (physicsSim == null) physicsSim = gameObject.AddComponent<RunnerSimulatePhysics3D>();
         physicsSim.ClientPhysicsSimulation = ClientPhysicsSimulation.SimulateAlways;
 
         var scene = SceneRef.FromIndex(SceneManager.GetActiveScene().buildIndex);
 
-        await _runner.StartGame(new StartGameArgs()
+        try
         {
-            GameMode = mode,
-            SessionName = "TestRoom",
-            Scene = scene,
-            SceneManager = gameObject.AddComponent<NetworkSceneManagerDefault>()
-        });
+            await _runner.StartGame(new StartGameArgs()
+            {
+                GameMode = mode,
+                SessionName = string.IsNullOrEmpty(SessionName) ? "TestRoom" : SessionName,
+                Scene = scene,
+                SceneManager = gameObject.GetComponent<NetworkSceneManagerDefault>() ?? gameObject.AddComponent<NetworkSceneManagerDefault>()
+            });
+
+            UpdateStatus(mode == GameMode.Host ? "Host started" : "Client started");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("[BasicSpawner] StartGame error: " + ex);
+            UpdateStatus("Start failed: " + ex.Message);
+        }
     }
 
-    private void OnGUI()
+    private void OnDestroy()
     {
-        if (_runner == null)
-        {
-            if (GUI.Button(new Rect(0, 0, 200, 40), "Host")) StartGame(GameMode.Host);
-            if (GUI.Button(new Rect(0, 40, 200, 40), "Join")) StartGame(GameMode.Client);
-        }
+        if (_runner != null)
+            _runner.RemoveCallbacks(this);
     }
 
     // ---------- Robust camera attach coroutine ----------
@@ -203,13 +223,11 @@ private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBal
                     var all = GameObject.FindObjectsOfType<NetworkObject>();
                     foreach (var no in all)
                     {
-                        // safe check: prefer objects that report they have input authority
                         bool hasInput = false;
-                        try { hasInput = no.HasInputAuthority; } catch { /* API differences might require method - this is safest */ }
+                        try { hasInput = no.HasInputAuthority; } catch { /*safe*/ }
 
                         if (hasInput)
                         {
-                            // we found a local-controlled NetworkObject — assume it's our player
                             playerObj = no;
                             break;
                         }
@@ -223,6 +241,18 @@ private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBal
 
             if (playerObj != null)
             {
+                bool isLocalAuthority = false;
+                try { isLocalAuthority = playerObj.HasInputAuthority; } catch { isLocalAuthority = false; }
+
+                Debug.Log($"[BasicSpawner] Candidate playerObj found: {playerObj.name} (InputAuth={playerObj.InputAuthority}) hasInput={isLocalAuthority} runner.LocalPlayer={runner.LocalPlayer} targetPlayer={player}");
+
+                if (!isLocalAuthority)
+                {
+                    elapsed += pollInterval;
+                    yield return new WaitForSeconds(pollInterval);
+                    continue;
+                }
+
                 AttachAndConfigureCamera(playerObj);
                 yield break;
             }
@@ -242,7 +272,6 @@ private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBal
             return;
         }
 
-        // Resolve the actual camera instance: inspector assigned or Camera.main
         Camera cam = mainCamera != null ? mainCamera : Camera.main;
         if (cam == null)
         {
@@ -250,10 +279,14 @@ private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBal
             return;
         }
 
-        // Force tag to MainCamera so Camera.main queries work later
+        if (cam.transform.parent == playerNetworkObject.transform)
+        {
+            Debug.Log("[BasicSpawner] Camera already parented to this player object — skipping.");
+            return;
+        }
+
         cam.tag = "MainCamera";
 
-        // Find anchor on player (case-insensitive if provided)
         Transform parentTransform = null;
         if (!string.IsNullOrEmpty(cameraAnchorName))
         {
@@ -273,14 +306,11 @@ private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBal
             }
         }
 
-        // Fall back to player root if no anchor found
         if (parentTransform == null)
             parentTransform = playerNetworkObject.transform;
 
-        // Parent the camera to the player; do NOT preserve world position so we control local transform
         cam.transform.SetParent(parentTransform, worldPositionStays: false);
 
-        // Set **exact local** transform values required:
         Vector3 lp = cam.transform.localPosition;
         lp.y = 1.17f;
         lp.z = -2f;
@@ -303,5 +333,12 @@ private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBal
             string name = (_localSelectedWeapon >= 0 && _localSelectedWeapon < _weaponNames.Length) ? _weaponNames[_localSelectedWeapon] : "Unknown";
             weaponIndicator.text = $"{weaponIndicatorPrefix}{name}";
         }
+    }
+
+    private void UpdateStatus(string s)
+    {
+        if (connectionStatusText != null)
+            connectionStatusText.text = s;
+        Debug.Log("[BasicSpawner] " + s);
     }
 }

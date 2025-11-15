@@ -13,13 +13,6 @@ public class FirstPersonMovement : NetworkBehaviour
     public KeyCode runningKey = KeyCode.LeftShift;
     public List<Func<float>> speedOverrides = new List<Func<float>>();
 
-    [Header("Mouse Look Settings")]
-    public Transform playerCamera;      // assign the camera (child of player)
-    public float mouseSensitivity = 2f;
-    public float maxLookAngle = 85f;
-
-    private float _pitch = 0f;
-
     private Rigidbody _rb;
     private Vector3 _inputDirection;
     private bool _isRunning;
@@ -35,14 +28,11 @@ public class FirstPersonMovement : NetworkBehaviour
 
     [Header("Player Hit Settings")]
     [SerializeField] private Transform _spawnPoint;
-    [Networked] private int hitCount { get; set; }
+    [Networked] private int hitCount { get; set; }    // <-- added (networked)
     public int maxHits = 10;
 
     [Networked] private TickTimer delay { get; set; }
     [Networked] public byte spawnedProjectileCounter { get; set; }
-
-[Header("Camera Settings")]
-[SerializeField] private FirstPersonLook fpsLook; // Drag your main camera's FirstPersonLook here
 
     // Visuals
     private ChangeDetector _changeDetector;
@@ -55,42 +45,57 @@ public class FirstPersonMovement : NetworkBehaviour
         var mr = GetComponentInChildren<MeshRenderer>();
         if (mr != null)
             _instanceMaterial = mr.material;
-
-        // Lock cursor for FPS
-        if (playerCamera != null)
-            Cursor.lockState = CursorLockMode.Locked;
     }
 
-public override void Spawned()
-{
-    _changeDetector = GetChangeDetector(ChangeDetector.Source.SimulationState);
-
-    if (_instanceMaterial != null)
-        _instanceMaterial.color = Color.blue;
-
-    _messages = FindObjectOfType<TMP_Text>();
-
-    // Enable FIRST PERSON LOOK only for the local player
-    if (Object.HasInputAuthority)
+    public override void Spawned()
     {
-        FirstPersonLook fpsLook = Camera.main.GetComponent<FirstPersonLook>();
+        _changeDetector = GetChangeDetector(ChangeDetector.Source.SimulationState);
+        if (_instanceMaterial != null)
+            _instanceMaterial.color = Color.blue;
 
-        if (fpsLook != null)
+        _messages = FindObjectOfType<TMP_Text>();
+
+        // Bind the main camera's FirstPersonLook to this player, but only for local player
+        try
         {
-            fpsLook.enabled = true;
-            fpsLook.SetCharacter(transform);   // NOW WORKS — using the public method
+            if (Runner != null)
+                Debug.Log($"[Spawned] Runner.LocalPlayer={Runner.LocalPlayer} Object.InputAuthority={Object.InputAuthority} HasInputAuthority={Object.HasInputAuthority}");
+            else
+                Debug.Log("[Spawned] Runner is null!");
+
+            if (Runner != null && Runner.LocalPlayer == Object.InputAuthority)
+            {
+                Debug.Log("[Spawned] This is the local player -> binding camera/look.");
+
+                var fpsLook = Camera.main ? Camera.main.GetComponent<FirstPersonLook>() : null;
+                if (fpsLook != null)
+                {
+                    fpsLook.SetCharacter(transform);   // assign player transform
+                    fpsLook.enabled = true;
+                    Cursor.lockState = CursorLockMode.Locked;
+                }
+                else
+                {
+                    Debug.LogWarning("[Spawned] Camera.main or FirstPersonLook not found. Make sure FirstPersonLook is on the main camera and disabled by default.");
+                }
+            }
+            else
+            {
+                Debug.Log("[Spawned] Not local player - skipping camera bind.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("[Spawned] Exception during camera bind: " + ex);
         }
     }
-}
-
-
-
 
     private void Update()
     {
+        // Only process local player's input for building movement intent, messages, and debug controls.
         if (!Object.HasInputAuthority) return;
 
-        // Movement input
+        // Movement input (read here; apply in FixedUpdateNetwork)
         float h = Input.GetAxis("Horizontal");
         float v = Input.GetAxis("Vertical");
         _inputDirection = new Vector3(h, 0, v);
@@ -98,39 +103,20 @@ public override void Spawned()
         // Running
         _isRunning = canRun && Input.GetKey(runningKey);
 
-        // Mouse look
-        HandleMouseLook();
-
         // TMP message test
         if (Input.GetKeyDown(KeyCode.R))
             RPC_SendMessage("Hey Mate!");
 
-        // Explode last dropped ball
+        // Debug: explode last dropped ball
         if (Input.GetKeyDown(KeyCode.X) && DroppedPhysxBall.LastSpawned != null)
             DroppedPhysxBall.LastSpawned.Explode();
-    }
-
-    private void HandleMouseLook()
-    {
-        if (playerCamera == null) return;
-
-        float mouseX = Input.GetAxis("Mouse X") * mouseSensitivity;
-        float mouseY = Input.GetAxis("Mouse Y") * mouseSensitivity;
-
-        // Rotate player (yaw)
-        transform.Rotate(Vector3.up * mouseX);
-
-        // Rotate camera (pitch)
-        _pitch -= mouseY;
-        _pitch = Mathf.Clamp(_pitch, -maxLookAngle, maxLookAngle);
-        playerCamera.localEulerAngles = new Vector3(_pitch, 0f, 0f);
     }
 
     public override void FixedUpdateNetwork()
     {
         if (!Object.HasInputAuthority) return;
 
-        // --- MOVEMENT ---
+        // Movement (match original Mini-FPS behaviour: horizontal and vertical multiplied separately)
         float targetSpeed = _isRunning ? runSpeed : speed;
         if (speedOverrides.Count > 0)
             targetSpeed = speedOverrides[speedOverrides.Count - 1]();
@@ -139,14 +125,14 @@ public override void Spawned()
         Vector3 velocity = transform.rotation * new Vector3(targetVelocity.x, _rb.linearVelocity.y, targetVelocity.y);
         _rb.linearVelocity = velocity;
 
-        // --- PROJECTILE SPAWN ---
+        // Projectiles: only state authority handles spawning & cooldowns
         if (!HasStateAuthority || !delay.ExpiredOrNotRunning(Runner)) return;
         if (!GetInput(out NetworkInputData data)) return;
         if (!data.buttons.IsSet(NetworkInputData.MOUSEBUTTON0)) return;
 
         delay = TickTimer.CreateFromSeconds(Runner, 0.5f);
 
-        Vector3 forward = transform.forward; // FPS always uses camera/player forward
+        Vector3 forward = transform.forward; // transform.forward will follow the yaw applied by FirstPersonLook's character rotation
         int selected = data.selectedWeapon;
 
         if (selected == 0) SpawnPhysxBall(forward);
