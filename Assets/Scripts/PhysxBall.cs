@@ -5,56 +5,80 @@ public class PhysxBall : NetworkBehaviour
 {
     [Networked] private TickTimer life { get; set; }
 
-    [Header("Runtime settings (editable in inspector)")]
-    [Tooltip("Multiplier applied to the incoming forward vector magnitude. Increase to go faster.")]
-    [SerializeField] private float speedMultiplier = 6f;
+    [Header("Fired Physx Settings")]
+    [SerializeField] private float speedMultiplier = 10f;
+    [SerializeField] private float firedUpwardBoost = 4f;
+    [SerializeField] private float lifeSeconds = 8f;
 
-    [Tooltip("How many seconds the projectile lives before being despawned.")]
-    [SerializeField] private float lifeSeconds = 10f;
-
-    // cached rigidbody
     private Rigidbody _rb;
+    private Collider _coll;
+    private bool _hasCollided = false;
 
     private void Awake()
     {
         _rb = GetComponent<Rigidbody>();
-        if (_rb == null)
-            Debug.LogWarning("[PhysxBall] No Rigidbody found on PhysxBall prefab.");
+        _coll = GetComponent<Collider>();
+        if (_rb == null) Debug.LogWarning("[PhysxBall] Missing Rigidbody on prefab.");
+        if (_coll == null) Debug.LogWarning("[PhysxBall] Missing Collider on prefab.");
     }
 
-    /// <summary>
-    /// Initialize the physx ball. Pass a forward vector (can be normalized * speed or raw direction).
-    /// The final linear velocity will be: forward * speedMultiplier
-    /// If you pass a vector whose magnitude encodes an initial speed (e.g. 10 * forwardDir),
-    /// it will be multiplied too (resulting speed = magnitude * speedMultiplier).
-    /// </summary>
-  public void Init(Vector3 forward)
-{
-    life = TickTimer.CreateFromSeconds(Runner, lifeSeconds);
-
-    if (_rb == null)
-        _rb = GetComponent<Rigidbody>();
-
-    if (_rb != null)
+    public void Init(Vector3 forward)
     {
-        // Initial velocity
-        _rb.linearVelocity = forward * speedMultiplier;
+        life = TickTimer.CreateFromSeconds(Runner, lifeSeconds);
 
-        // EXTRA LIFT so projectile travels farther 
-        // (tune 3f–8f depending on how flat you want the shot)
-        _rb.AddForce(Vector3.up * 5f, ForceMode.VelocityChange);
+        if (_rb != null)
+        {
+            _rb.isKinematic = false;
+            _rb.useGravity = true;
+            _rb.linearDamping = 0f;
+            _rb.angularDamping = 0f;
+            _rb.linearVelocity = forward * speedMultiplier;
 
-        // Optional: make it even smoother
-        _rb.linearDamping = 0f;
-        _rb.angularDamping = 0f;
+            if (firedUpwardBoost != 0f)
+                _rb.AddForce(Vector3.up * firedUpwardBoost, ForceMode.VelocityChange);
+        }
+        else
+        {
+            // fallback movement if no rigidbody (unlikely)
+            transform.position += forward * speedMultiplier * Runner.DeltaTime;
+        }
     }
-}
+
+    private void OnCollisionEnter(Collision collision)
+    {
+        if (_hasCollided) return;
+        _hasCollided = true;
+
+        // avoid double-fire
+        if (_coll != null)
+            _coll.enabled = false;
+
+        // Here you can check collision tags to apply effects:
+        // if (collision.gameObject.CompareTag("Player")) { ... }
+
+        // Despawn on server (authoritative)
+        try
+        {
+            if (Runner != null && Runner.IsServer)
+            {
+                Runner.Despawn(Object);
+                return;
+            }
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogWarning("[PhysxBall] Failed to Runner.Despawn: " + ex.Message);
+        }
+
+        // Fallback for non-server: disable the object so it doesn't linger
+        gameObject.SetActive(false);
+    }
 
     public override void FixedUpdateNetwork()
     {
         if (life.Expired(Runner))
         {
-            Runner.Despawn(Object);
+            try { Runner.Despawn(Object); } catch { gameObject.SetActive(false); }
         }
     }
 }
