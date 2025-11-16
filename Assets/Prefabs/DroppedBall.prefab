@@ -68,10 +68,10 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   miniBallPrefab: {fileID: 882592248882707198, guid: ea8be5a2701dfb14cac706c85281c7bb, type: 3}
-  miniBallCount: 8
-  miniBallForce: 5
-  miniBallArc: 1
-  miniBallDuration: 5
+  miniBallCount: 4
+  miniBallForce: 30
+  miniBallArc: 2
+  miniBallDuration: 10
   autoExplodeTime: 15
 --- !u!114 &7548797609140737920
 MonoBehaviour:

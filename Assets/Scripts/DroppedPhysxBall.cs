@@ -104,7 +104,7 @@ public class DroppedPhysxBall : NetworkBehaviour
 // Helper class for miniballs
 public class MiniBall : MonoBehaviour
 {
-    private float _lifetime = 5f;
+    private float _lifetime = 10f;
     private float _spawnTime;
 
     public void SetLifetime(float duration)

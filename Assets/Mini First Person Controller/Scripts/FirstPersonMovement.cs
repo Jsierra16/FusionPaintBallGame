@@ -1,247 +1,323 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Reflection;
 using Fusion;
 using UnityEngine;
 using TMPro;
 
+/// <summary>
+/// FirstPersonMovement - owner-predicted movement for a Rigidbody player using Fusion.
+/// Reads Fusion network input for the local player using Runner.GetInputForPlayer&lt;NetworkInputData&gt; when available.
+/// Disables NetworkTransform on the owner so local physics isn't overwritten.
+/// </summary>
 public class FirstPersonMovement : NetworkBehaviour
 {
-    [Header("Movement Settings")]
+    [Header("Movement")]
     public float speed = 5f;
-    public bool canRun = true;
-    public float runSpeed = 9f;
-    public KeyCode runningKey = KeyCode.LeftShift;
-    public List<Func<float>> speedOverrides = new List<Func<float>>();
+    public float acceleration = 20f;
 
-    private Rigidbody _rb;
-    private Vector3 _inputDirection;
-    private bool _isRunning;
-    public bool IsRunning => _isRunning;
+    [Header("References")]
+    [Tooltip("Rigidbody attached to the player root.")]
+    public Rigidbody rb;
 
-    [Header("Projectile Prefabs")]
-    [SerializeField] private PhysxBall _prefabPhysxBall;
-    [SerializeField] private DroppedPhysxBall _prefabDroppedBall;
-    [SerializeField] private LobbedPhysxBall _prefabLobbedBall;
+    [Tooltip("Optional camera or look root (for rotation visuals only).")]
+    public Transform renderRoot;
 
-    [Header("Projectile Spawn Point")]
-    [SerializeField] private Transform _projectileSpawnPoint;
+    [Header("Debug / UI")]
+    public TMP_Text messages;
 
-    [Header("Player Hit Settings")]
-    [SerializeField] private Transform _spawnPoint;
-    [Networked] private int hitCount { get; set; }    // <-- added (networked)
-    public int maxHits = 10;
+    Camera localCamera;
 
-    [Networked] private TickTimer delay { get; set; }
-    [Networked] public byte spawnedProjectileCounter { get; set; }
+    [Header("Compatibility")]
+    public bool IsRunningPublicInspector;
+    public bool IsRunning { get; private set; } = false;
 
-    // Visuals
-    private ChangeDetector _changeDetector;
-    private Material _instanceMaterial;
-    private TMP_Text _messages;
+    [Serializable]
+    public class SpeedOverrides
+    {
+        public float walk = 1f;
+        public float run = 1.6f;
+        public float crouch = 0.5f;
+        public float sprint = 2f;
+        public float air = 0.85f;
+        public List<string> keys = new List<string>();
+        [NonSerialized] private Dictionary<string, float> namedValues = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        [NonSerialized] private List<Func<float>> funcOverrides = new List<Func<float>>();
+
+        public bool TryGetValue(string key, out float value)
+        {
+            if (string.IsNullOrEmpty(key)) { value = walk; return false; }
+            switch (key.ToLowerInvariant())
+            {
+                case "walk": value = walk; return true;
+                case "run": value = run; return true;
+                case "crouch": value = crouch; return true;
+                case "sprint": value = sprint; return true;
+                case "air": value = air; return true;
+            }
+            if (namedValues.TryGetValue(key, out value)) return true;
+            value = walk; return false;
+        }
+
+        public float this[string key]
+        {
+            get { if (TryGetValue(key, out float v)) return v; return walk; }
+            set
+            {
+                if (string.IsNullOrEmpty(key)) return;
+                switch (key.ToLowerInvariant())
+                {
+                    case "walk": walk = value; return;
+                    case "run": run = value; return;
+                    case "crouch": crouch = value; return;
+                    case "sprint": sprint = value; return;
+                    case "air": air = value; return;
+                }
+                namedValues[key] = value;
+                if (!keys.Contains(key)) keys.Add(key);
+            }
+        }
+
+        public bool Contains(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return false;
+            switch (key.ToLowerInvariant())
+            {
+                case "walk": case "run": case "crouch": case "sprint": case "air": return true;
+            }
+            if (keys != null && keys.Contains(key)) return true;
+            if (namedValues != null && namedValues.ContainsKey(key)) return true;
+            return false;
+        }
+
+        public void Add(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            if (keys == null) keys = new List<string>();
+            if (!keys.Contains(key)) keys.Add(key);
+            if (!namedValues.ContainsKey(key)) namedValues[key] = walk;
+        }
+
+        public bool Remove(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return false;
+            bool removed = false;
+            if (keys != null) removed = keys.Remove(key) || removed;
+            if (namedValues != null) removed = namedValues.Remove(key) || removed;
+            return removed;
+        }
+
+        public List<string> GetKeys() => new List<string>(keys ?? new List<string>());
+
+        public bool Contains(Func<float> func) => func != null && funcOverrides != null && funcOverrides.Contains(func);
+        public void Add(Func<float> func) { if (func == null) return; if (funcOverrides == null) funcOverrides = new List<Func<float>>(); if (!funcOverrides.Contains(func)) funcOverrides.Add(func); }
+        public bool Remove(Func<float> func) { if (func == null || funcOverrides == null) return false; return funcOverrides.Remove(func); }
+        public List<Func<float>> GetFunctionOverrides() => new List<Func<float>>(funcOverrides ?? new List<Func<float>>());
+    }
+
+    public SpeedOverrides speedOverrides = new SpeedOverrides();
+
+    // internal movement state
+    Vector3 _velocityTarget;
+    Vector3 _localVelocity;
+
+    private void Reset()
+    {
+        if (rb == null) rb = GetComponent<Rigidbody>();
+        if (renderRoot == null && transform.childCount > 0) renderRoot = transform.GetChild(0);
+    }
 
     private void Awake()
     {
-        _rb = GetComponent<Rigidbody>();
-        var mr = GetComponentInChildren<MeshRenderer>();
-        if (mr != null)
-            _instanceMaterial = mr.material;
+        if (rb == null) rb = GetComponent<Rigidbody>();
+        if (rb == null) Debug.LogError("[FirstPersonMovement] No Rigidbody assigned or found on the object.");
+        if (messages == null) messages = FindObjectOfType<TMP_Text>();
     }
 
     public override void Spawned()
     {
-        _changeDetector = GetChangeDetector(ChangeDetector.Source.SimulationState);
-        if (_instanceMaterial != null)
-            _instanceMaterial.color = Color.blue;
+        Debug.Log($"[FPM] Spawned() called. HasInputAuthority={Object.HasInputAuthority} Runner.LocalPlayer={Runner.LocalPlayer}");
 
-        _messages = FindObjectOfType<TMP_Text>();
+        // ensure Rigidbody exists & allow movement (freeze rotation only)
+        if (rb == null) rb = GetComponent<Rigidbody>();
+        if (rb != null)
+        {
+            rb.useGravity = true;
+            rb.constraints = RigidbodyConstraints.FreezeRotation;
+        }
 
-        // Bind the main camera's FirstPersonLook to this player, but only for local player
+        // owner vs remote physics
+        if (Object.HasInputAuthority)
+        {
+            if (rb != null)
+            {
+                rb.isKinematic = false;
+                rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            }
+        }
+        else
+        {
+            if (rb != null)
+            {
+                rb.isKinematic = true;
+                rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
+            }
+        }
+
+        // enable/disable child cameras only (BasicSpawner handles local camera prefab)
+        Camera[] childCams = GetComponentsInChildren<Camera>(true);
+        foreach (Camera c in childCams)
+        {
+            c.enabled = Object.HasInputAuthority;
+            try { if (c.enabled) c.tag = "MainCamera"; else if (c.tag == "MainCamera") c.tag = "Untagged"; } catch { }
+            if (c.enabled && localCamera == null) localCamera = c;
+        }
+
+        // disable NetworkTransform on owner so local physics isn't overwritten
+        TryToggleNetworkTransform(!Object.HasInputAuthority);
+
+        _localVelocity = Vector3.zero;
+        _velocityTarget = Vector3.zero;
+
+        Debug.Log("[FPM] Spawned() finished.");
+    }
+
+    void TryToggleNetworkTransform(bool enable)
+    {
         try
         {
-            if (Runner != null)
-                Debug.Log($"[Spawned] Runner.LocalPlayer={Runner.LocalPlayer} Object.InputAuthority={Object.InputAuthority} HasInputAuthority={Object.HasInputAuthority}");
-            else
-                Debug.Log("[Spawned] Runner is null!");
-
-            if (Runner != null && Runner.LocalPlayer == Object.InputAuthority)
+            Type ntType = null;
+            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            foreach (var asm in assemblies)
             {
-                Debug.Log("[Spawned] This is the local player -> binding camera/look.");
+                try
+                {
+                    foreach (var t in asm.GetTypes())
+                    {
+                        if (t.Name == "NetworkTransform")
+                        {
+                            ntType = t;
+                            break;
+                        }
+                    }
+                }
+                catch { }
+                if (ntType != null) break;
+            }
 
-                var fpsLook = Camera.main ? Camera.main.GetComponent<FirstPersonLook>() : null;
-                if (fpsLook != null)
-                {
-                    fpsLook.SetCharacter(transform);   // assign player transform
-                    fpsLook.enabled = true;
-                    Cursor.lockState = CursorLockMode.Locked;
-                }
-                else
-                {
-                    Debug.LogWarning("[Spawned] Camera.main or FirstPersonLook not found. Make sure FirstPersonLook is on the main camera and disabled by default.");
-                }
+            if (ntType == null) return;
+
+            var ntComp = GetComponent(ntType) as Component;
+            if (ntComp == null) return;
+
+            // Use UnityEngine.Behaviour explicit to avoid ambiguity with Fusion.Behaviour
+            var behaviour = ntComp as UnityEngine.Behaviour;
+            if (behaviour != null)
+            {
+                behaviour.enabled = enable;
+                Debug.Log($"[FPM][NT] NetworkTransform {(behaviour.enabled ? "ENABLED (remote)" : "DISABLED (owner)")}");
             }
             else
             {
-                Debug.Log("[Spawned] Not local player - skipping camera bind.");
+                Debug.LogWarning("[FPM][NT] NetworkTransform exists but could not be cast to UnityEngine.Behaviour.");
             }
         }
         catch (Exception ex)
         {
-            Debug.LogError("[Spawned] Exception during camera bind: " + ex);
+            Debug.LogWarning("[FPM][NT] Exception while toggling NetworkTransform: " + ex.Message);
         }
     }
 
-    private void Update()
-    {
-        // Only process local player's input for building movement intent, messages, and debug controls.
-        if (!Object.HasInputAuthority) return;
-
-        // Movement input (read here; apply in FixedUpdateNetwork)
-        float h = Input.GetAxis("Horizontal");
-        float v = Input.GetAxis("Vertical");
-        _inputDirection = new Vector3(h, 0, v);
-
-        // Running
-        _isRunning = canRun && Input.GetKey(runningKey);
-
-        // TMP message test
-        if (Input.GetKeyDown(KeyCode.R))
-            RPC_SendMessage("Hey Mate!");
-
-        // Debug: explode last dropped ball
-        if (Input.GetKeyDown(KeyCode.X) && DroppedPhysxBall.LastSpawned != null)
-            DroppedPhysxBall.LastSpawned.Explode();
-    }
-
+    // FixedUpdateNetwork: prefer Fusion network input via Runner.GetInputForPlayer<NetworkInputData>
     public override void FixedUpdateNetwork()
     {
-        if (!Object.HasInputAuthority) return;
+        base.FixedUpdateNetwork();
 
-        // Movement (match original Mini-FPS behaviour: horizontal and vertical multiplied separately)
-        float targetSpeed = _isRunning ? runSpeed : speed;
-        if (speedOverrides.Count > 0)
-            targetSpeed = speedOverrides[speedOverrides.Count - 1]();
+        if (!Object.HasInputAuthority)
+            return; // remote players driven by NetworkTransform
 
-        Vector2 targetVelocity = new Vector2(_inputDirection.x * targetSpeed, _inputDirection.z * targetSpeed);
-        Vector3 velocity = transform.rotation * new Vector3(targetVelocity.x, _rb.linearVelocity.y, targetVelocity.y);
-        _rb.linearVelocity = velocity;
+        bool hasNetInput = false;
+        Vector3 netDirection = Vector3.zero;
 
-        // Projectiles: only state authority handles spawning & cooldowns
-        if (!HasStateAuthority || !delay.ExpiredOrNotRunning(Runner)) return;
-        if (!GetInput(out NetworkInputData data)) return;
-        if (!data.buttons.IsSet(NetworkInputData.MOUSEBUTTON0)) return;
-
-        delay = TickTimer.CreateFromSeconds(Runner, 0.5f);
-
-        Vector3 forward = transform.forward; // transform.forward will follow the yaw applied by FirstPersonLook's character rotation
-        int selected = data.selectedWeapon;
-
-        if (selected == 0) SpawnPhysxBall(forward);
-        else if (selected == 1) SpawnDroppedBall(forward);
-        else if (selected == 2) SpawnLobbedBall(forward);
-    }
-
-    private Vector3 GetSpawnPosition()
-    {
-        return _projectileSpawnPoint != null ? _projectileSpawnPoint.position : transform.position + transform.forward;
-    }
-
-    private void SpawnPhysxBall(Vector3 forward)
-    {
-        if (_prefabPhysxBall == null) return;
-
-        Runner.Spawn(
-            _prefabPhysxBall,
-            GetSpawnPosition(),
-            Quaternion.LookRotation(forward),
-            Object.InputAuthority,
-            (runner, o) => o.GetComponent<PhysxBall>()?.Init(10 * forward));
-
-        spawnedProjectileCounter++;
-    }
-
-    private void SpawnDroppedBall(Vector3 forward)
-    {
-        if (_prefabDroppedBall == null) return;
-
-        Runner.Spawn(
-            _prefabDroppedBall,
-            GetSpawnPosition(),
-            Quaternion.identity,
-            Object.InputAuthority,
-            (runner, o) =>
+        // Try to read Fusion input for the owner using Runner.GetInputForPlayer<T>()
+        try
+        {
+            // Object.InputAuthority is the PlayerRef that has input for this object.
+            // Runner.GetInputForPlayer<T> returns a nullable T? where T must be unmanaged & INetworkInput.
+            // NetworkInputData in your project (used in BasicSpawner.OnInput) should satisfy those constraints.
+            var maybe = Runner.GetInputForPlayer<NetworkInputData>(Object.InputAuthority);
+            if (maybe.HasValue)
             {
-                var dropComp = o.GetComponent<DroppedPhysxBall>();
-                Rigidbody rb = dropComp?.GetComponent<Rigidbody>();
-                if (rb != null) { rb.useGravity = true; rb.isKinematic = false; }
-            });
-
-        spawnedProjectileCounter++;
-    }
-
-    private void SpawnLobbedBall(Vector3 forward)
-    {
-        if (_prefabLobbedBall == null) return;
-
-        Runner.Spawn(
-            _prefabLobbedBall,
-            GetSpawnPosition(),
-            Quaternion.LookRotation(forward),
-            Object.InputAuthority,
-            (runner, o) => o.GetComponent<LobbedPhysxBall>()?.Init(forward.normalized));
-
-        spawnedProjectileCounter++;
-    }
-
-    // ===== HIT / RESPAWN SYSTEM =====
-    public void TakeHit()
-    {
-        if (!HasStateAuthority) return;
-
-        hitCount++;
-        if (_spawnPoint != null)
+                netDirection = maybe.Value.direction;
+                hasNetInput = true;
+            }
+        }
+        catch (Exception ex)
         {
-            _rb.position = _spawnPoint.position;
-            _rb.linearVelocity = Vector3.zero;
+            // If this fails (type mismatch or method unavailable), fall back to Unity Input below.
+            Debug.Log("[FPM] Runner.GetInputForPlayer attempt failed (will fallback to Unity Input). " + ex.Message);
+            hasNetInput = false;
         }
 
-        if (_instanceMaterial != null)
-            _instanceMaterial.color = Color.red;
-
-        if (hitCount >= maxHits)
-            EndGame();
-    }
-
-    private void EndGame()
-    {
-        Debug.Log("Game Over!");
-        canRun = false;
-        speed = 0;
-        Cursor.lockState = CursorLockMode.None;
-    }
-
-    public override void Render()
-    {
-        if (_changeDetector == null || _instanceMaterial == null) return;
-
-        foreach (var change in _changeDetector.DetectChanges(this))
+        if (!hasNetInput)
         {
-            if (change == nameof(spawnedProjectileCounter))
-                _instanceMaterial.color = Color.white;
+            // Editor/testing fallback to Unity input so you can test without networked input.
+            float h = Input.GetAxisRaw("Horizontal");
+            float v = Input.GetAxisRaw("Vertical");
+            netDirection = new Vector3(h, 0f, v);
         }
 
-        _instanceMaterial.color = Color.Lerp(_instanceMaterial.color, Color.blue, Time.deltaTime);
+        netDirection = Vector3.ClampMagnitude(netDirection, 1f);
+
+        // Convert to world space directions relative to body
+        Vector3 forward = transform.forward;
+        Vector3 right = transform.right;
+
+        float multiplier = IsRunning ? speedOverrides.run : 1f;
+        _velocityTarget = (right * netDirection.x + forward * netDirection.z) * speed * multiplier;
+
+        // Smooth velocity
+        _localVelocity = Vector3.MoveTowards(_localVelocity, _velocityTarget, acceleration * Runner.DeltaTime);
+
+        // Apply via physics MovePosition
+        if (rb != null)
+        {
+            Vector3 delta = _localVelocity * Runner.DeltaTime;
+            Vector3 newPos = rb.position + delta;
+            rb.MovePosition(newPos);
+            Debug.Log($"[FPM][Fixed] netDir:{netDirection} localVel:{_localVelocity} rb.pos:{rb.position} -> newPos:{newPos}");
+        }
     }
 
-    // RPCs
-    [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority, HostMode = RpcHostMode.SourceIsHostPlayer)]
-    public void RPC_SendMessage(string message, RpcInfo info = default) => RPC_RelayMessage(message, info.Source);
-
-    [Rpc(RpcSources.StateAuthority, RpcTargets.All, HostMode = RpcHostMode.SourceIsServer)]
-    public void RPC_RelayMessage(string message, PlayerRef messageSource)
+    // Jump RPC (unchanged)
+    [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority)]
+    public void RPC_RequestJump(float strength, RpcInfo info = default)
     {
-        if (_messages == null) _messages = FindObjectOfType<TMP_Text>();
-        if (_messages == null) return;
+        if (!Object.HasStateAuthority) return;
+        Rigidbody serverRb = rb ?? GetComponent<Rigidbody>();
+        if (serverRb != null)
+            serverRb.AddForce(Vector3.up * strength, ForceMode.Impulse);
+    }
 
-        _messages.text += messageSource == Runner.LocalPlayer ? $"You said: {message}\n" : $"Some other player said: {message}\n";
+    [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority)]
+    public void RPC_SendMessage(string message, RpcInfo info = default)
+    {
+        if (Object.HasStateAuthority) RPC_RelayMessage(message, info.Source);
+    }
+
+    [Rpc(RpcSources.StateAuthority, RpcTargets.All)]
+    public void RPC_RelayMessage(string message, PlayerRef messageSource, RpcInfo info = default)
+    {
+        if (messages == null) messages = FindObjectOfType<TMP_Text>();
+        if (messages == null) return;
+        bool isLocal = (messageSource == Runner.LocalPlayer);
+        messages.text += isLocal ? $"You said: {message}\n" : $"Player {messageSource.PlayerId} said: {message}\n";
+    }
+
+    public void SendChatMessage(string msg)
+    {
+        if (Object == null) return;
+        if (Object.HasInputAuthority) RPC_SendMessage(msg);
+        else Debug.LogWarning("[FirstPersonMovement] Tried to SendChatMessage on non-input-authority object.");
     }
 }

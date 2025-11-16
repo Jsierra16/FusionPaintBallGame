@@ -316,7 +316,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   playerName: Player
   hitsText: {fileID: 6759375277018899096}
-  maxHits: 3
+  maxHits: 1
   currentHits: 0
 --- !u!65 &-5818153461026017731
 BoxCollider:

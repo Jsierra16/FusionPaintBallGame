@@ -3,39 +3,111 @@
 [ExecuteInEditMode]
 public class GroundCheck : MonoBehaviour
 {
-    [Tooltip("Maximum distance from the ground.")]
-    public float distanceThreshold = .15f;
+    [Header("Ground Check")]
+    [Tooltip("Layers considered ground. Leave empty to automatically use layer named 'Ground' if it exists.")]
+    public LayerMask groundLayers = 0;
 
-    [Tooltip("Whether this transform is grounded now.")]
-    public bool isGrounded = true;
-    /// <summary>
-    /// Called when the ground is touched again.
-    /// </summary>
+    [Tooltip("Radius of the sphere used to detect ground.")]
+    public float radius = 0.25f;
+
+    [Tooltip("Vertical offset from transform.position to perform the check from.")]
+    public float originYOffset = 0.1f;
+
+    [Tooltip("Max distance below origin to consider grounded.")]
+    public float maxDistance = 0.15f;
+
+    [Tooltip("Frequency in seconds to update the ground query in edit mode.")]
+    public float updateInterval = 0.05f;
+
+    [HideInInspector]
+    public bool isGrounded = false;
+
     public event System.Action Grounded;
 
-    const float OriginOffset = .001f;
-    Vector3 RaycastOrigin => transform.position + Vector3.up * OriginOffset;
-    float RaycastDistance => distanceThreshold + OriginOffset;
+    private float _nextUpdate = 0f;
 
-
-    void LateUpdate()
+    private void Awake()
     {
-        // Check if we are grounded now.
-        bool isGroundedNow = Physics.Raycast(RaycastOrigin, Vector3.down, distanceThreshold * 2);
+        // If the inspector left the LayerMask at 0, try to auto-select the "Ground" layer
+        if (groundLayers == 0)
+        {
+            int groundLayerIndex = LayerMask.NameToLayer("Ground");
+            if (groundLayerIndex >= 0)
+            {
+                groundLayers = 1 << groundLayerIndex;
+            }
+            else
+            {
+                // fallback to everything so we don't accidentally ignore ground entirely
+                groundLayers = ~0;
+            }
+        }
+    }
 
-        // Call event if we were in the air and we are now touching the ground.
-        if (isGroundedNow && !isGrounded)
+    private void Reset()
+    {
+        // sensible defaults when adding the component
+        radius = 0.25f;
+        originYOffset = 0.1f;
+        maxDistance = 0.15f;
+        groundLayers = 0; // allow Awake to resolve to "Ground" automatically
+    }
+
+    private void Update()
+    {
+        // Keep updating in edit mode too, but throttle it
+        if (Application.isEditor)
+        {
+            if (Time.realtimeSinceStartup >= _nextUpdate)
+            {
+                _nextUpdate = Time.realtimeSinceStartup + Mathf.Max(0.01f, updateInterval);
+                RunCheck();
+            }
+        }
+        else
+        {
+            RunCheck();
+        }
+    }
+
+    private void RunCheck()
+    {
+        Vector3 origin = transform.position + Vector3.up * originYOffset;
+        // center of sphere at the bottom of the origin offset (we want to check below feet)
+        Vector3 sphereCenter = origin + Vector3.down * (maxDistance + radius);
+
+        // Physics.OverlapSphere is simple and robust for small character controllers
+        Collider[] hits = Physics.OverlapSphere(sphereCenter, radius, groundLayers);
+        bool groundedNow = false;
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Collider c = hits[i];
+            if (c == null) continue;
+            // ignore triggers by default
+            if (c.isTrigger) continue;
+
+            groundedNow = true;
+            break;
+        }
+
+        if (!isGrounded && groundedNow)
         {
             Grounded?.Invoke();
         }
 
-        // Update isGrounded.
-        isGrounded = isGroundedNow;
+        isGrounded = groundedNow;
     }
 
-    void OnDrawGizmosSelected()
+    private void OnDrawGizmosSelected()
     {
-        // Draw a line in the Editor to show whether we are touching the ground.
-        Debug.DrawLine(RaycastOrigin, RaycastOrigin + Vector3.down * RaycastDistance, isGrounded ? Color.white : Color.red);
+        Vector3 origin = transform.position + Vector3.up * originYOffset;
+        Vector3 sphereCenter = origin + Vector3.down * (maxDistance + radius);
+
+        Gizmos.color = isGrounded ? Color.green : Color.red;
+        Gizmos.DrawWireSphere(sphereCenter, radius);
+
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawLine(origin, origin + Vector3.down * (maxDistance + radius));
     }
 }

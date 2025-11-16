@@ -16,6 +16,10 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
     [Header("Camera (assign the actual Camera GameObject here, or leave empty to use Camera.main)")]
     [SerializeField] private Camera mainCamera;
 
+    [Header("Local Camera Prefab (per-client, not networked)")]
+    [Tooltip("Prefab containing a Camera + FirstPersonLook (disabled by default). Instantiated per client and parented to the local player.")]
+    [SerializeField] private GameObject localCameraPrefab;
+
     [Header("Optional: name of child transform inside the player to parent the camera to (case-insensitive)")]
     [SerializeField] private string cameraAnchorName = "CameraAnchor";
 
@@ -36,6 +40,10 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
     private int _lastDisplayedWeapon = -1;
 
     private readonly string[] _weaponNames = new string[] { "PhysxBall", "DroppedBall", "LobbedBall" };
+
+    // ---------- Local camera instance (per client) ----------
+    // Only used locally — not networked
+    private Camera _localCameraInstance;
 
     // ---------- Public UI methods (hook these to Buttons) ----------
     /// <summary>Call this from a UI Button OnClick to start a Host session.</summary>
@@ -79,6 +87,17 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
         {
             runner.Despawn(networkObject);
             _spawnedCharacters.Remove(player);
+        }
+
+        // If the local player disconnected/left on this client, destroy local camera instance
+        if (runner.LocalPlayer == player)
+        {
+            if (_localCameraInstance != null)
+            {
+                Destroy(_localCameraInstance.gameObject);
+                _localCameraInstance = null;
+                Debug.Log("[BasicSpawner] Destroyed local camera instance because local player left.");
+            }
         }
     }
 
@@ -272,21 +291,53 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
             return;
         }
 
-        Camera cam = mainCamera != null ? mainCamera : Camera.main;
-        if (cam == null)
+        Camera cam = null;
+
+        // Prefer per-client prefab if assigned
+        if (localCameraPrefab != null)
         {
-            Debug.LogWarning("[BasicSpawner] No camera assigned in inspector and Camera.main is null. Cannot attach.");
-            return;
+            if (_localCameraInstance == null)
+            {
+                // instantiate local camera prefab (not networked)
+                GameObject go = Instantiate(localCameraPrefab);
+                go.name = "LocalCamera_Instance";
+                cam = go.GetComponentInChildren<Camera>();
+                if (cam == null)
+                {
+                    Debug.LogWarning("[BasicSpawner] localCameraPrefab does not contain a Camera component.");
+                    Destroy(go);
+                    return;
+                }
+
+                _localCameraInstance = cam;
+                Debug.Log("[BasicSpawner] Instantiated local camera prefab for this client.");
+            }
+            else
+            {
+                cam = _localCameraInstance;
+                Debug.Log("[BasicSpawner] Reusing existing local camera instance.");
+            }
+        }
+        else
+        {
+            // fallback to mainCamera / Camera.main (not recommended for multiplayer)
+            cam = mainCamera != null ? mainCamera : Camera.main;
+            if (cam == null)
+            {
+                Debug.LogWarning("[BasicSpawner] No camera assigned in inspector and Camera.main is null. Cannot attach.");
+                return;
+            }
+            Debug.LogWarning("[BasicSpawner] No localCameraPrefab assigned. Using shared Camera (Camera.main) as fallback.");
         }
 
+        // If camera already parented to this player, nothing to do
         if (cam.transform.parent == playerNetworkObject.transform)
         {
             Debug.Log("[BasicSpawner] Camera already parented to this player object — skipping.");
             return;
         }
 
-        cam.tag = "MainCamera";
-
+        // parent target: anchor or root
         Transform parentTransform = null;
         if (!string.IsNullOrEmpty(cameraAnchorName))
         {
@@ -311,14 +362,24 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
 
         cam.transform.SetParent(parentTransform, worldPositionStays: false);
 
-        Vector3 lp = cam.transform.localPosition;
-        lp.y = 1.17f;
-        lp.z = -2f;
-        cam.transform.localPosition = lp;
+        // set local transform precisely
+        cam.transform.localPosition = new Vector3(0f, 1.17f, -2f);
+        cam.transform.localEulerAngles = new Vector3(14f, 0f, 0f);
 
-        Vector3 lr = cam.transform.localEulerAngles;
-        lr.x = 14f;
-        cam.transform.localEulerAngles = lr;
+        // set tag locally
+        cam.tag = "MainCamera";
+
+        // enable and wire FirstPersonLook on local camera
+        var fpsLook = cam.GetComponent<FirstPersonLook>();
+        if (fpsLook != null)
+        {
+            fpsLook.SetCharacter(playerNetworkObject.transform);
+            fpsLook.enabled = true;
+        }
+        else
+        {
+            Debug.LogWarning("[BasicSpawner] Local camera prefab doesn't have FirstPersonLook. Ensure it is present and disabled by default.");
+        }
 
         Debug.Log($"[BasicSpawner] Camera '{cam.name}' attached to '{playerNetworkObject.name}' at localPos={cam.transform.localPosition}, localRot={cam.transform.localEulerAngles}");
     }
