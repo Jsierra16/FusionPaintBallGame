@@ -28,6 +28,10 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
     [SerializeField] private string weaponIndicatorPrefix = "Weapon: ";
     [SerializeField] public TMP_Text connectionStatusText;
 
+    [Header("Dev convenience")]
+    [Tooltip("When true, Host/Client buttons will use AutoHostOrClient mode so the first instance creates a room and others join automatically.")]
+    [SerializeField] private bool useAutoHostOrClient = true;
+
     // server-side spawned tracking
     private Dictionary<PlayerRef, NetworkObject> _spawnedCharacters = new Dictionary<PlayerRef, NetworkObject>();
 
@@ -47,10 +51,22 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
 
     // ---------- Public UI methods (hook these to Buttons) ----------
     /// <summary>Call this from a UI Button OnClick to start a Host session.</summary>
-    public void StartHost() => _ = StartGame(GameMode.Host);
+    public void StartHost()
+    {
+        if (useAutoHostOrClient)
+            _ = StartGame(GameMode.AutoHostOrClient);
+        else
+            _ = StartGame(GameMode.Host);
+    }
 
     /// <summary>Call this from a UI Button OnClick to start a Client session (join).</summary>
-    public void StartClient() => _ = StartGame(GameMode.Client);
+    public void StartClient()
+    {
+        if (useAutoHostOrClient)
+            _ = StartGame(GameMode.AutoHostOrClient);
+        else
+            _ = StartGame(GameMode.Client);
+    }
 
     /// <summary>Optional helper: set session name from UI.</summary>
     public string SessionName = "TestRoom";
@@ -165,7 +181,7 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
     // ---------- Start/Host/Join ----------
     async Task StartGame(GameMode mode)
     {
-        UpdateStatus(mode == GameMode.Host ? "Starting Host..." : "Starting Client...");
+        UpdateStatus(mode == GameMode.Host ? "Starting Host..." : (mode == GameMode.Client ? "Starting Client..." : "Starting AutoHostOrClient..."));
 
         // create runner
         _runner = gameObject.GetComponent<NetworkRunner>();
@@ -181,6 +197,7 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
 
         try
         {
+            Debug.Log($"[BasicSpawner] Starting Runner with mode={mode}, sessionName='{(string.IsNullOrEmpty(SessionName) ? "TestRoom" : SessionName)}'");
             await _runner.StartGame(new StartGameArgs()
             {
                 GameMode = mode,
@@ -189,11 +206,15 @@ public class BasicSpawner : MonoBehaviour, INetworkRunnerCallbacks
                 SceneManager = gameObject.GetComponent<NetworkSceneManagerDefault>() ?? gameObject.AddComponent<NetworkSceneManagerDefault>()
             });
 
-            UpdateStatus(mode == GameMode.Host ? "Host started" : "Client started");
+            UpdateStatus(mode == GameMode.Host ? "Host started" : (mode == GameMode.Client ? "Client started" : "AutoHostOrClient started"));
         }
         catch (Exception ex)
         {
-            Debug.LogError("[BasicSpawner] StartGame error: " + ex);
+            // Print the full exception and inner exception if present — Fusion wraps join failures here.
+            Debug.LogError("[BasicSpawner] StartGame error (full): " + ex.ToString());
+            if (ex.InnerException != null)
+                Debug.LogError("[BasicSpawner] StartGame inner exception: " + ex.InnerException.ToString());
+
             UpdateStatus("Start failed: " + ex.Message);
         }
     }

@@ -343,7 +343,7 @@ MonoBehaviour:
   originYOffset: 0.1
   maxDistance: 0.15
   updateInterval: 0.05
-  isGrounded: 0
+  isGrounded: 1
 --- !u!1 &1773623360729482
 GameObject:
   m_ObjectHideFlags: 0
@@ -453,19 +453,34 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   speed: 5
-  acceleration: 20
-  rotationSpeed: 10
-  rb: {fileID: 54063890643546284}
-  renderRoot: {fileID: 0}
-  messages: {fileID: 0}
-  IsRunningPublicInspector: 0
-  speedOverrides:
-    walk: 1
-    run: 1.6
-    crouch: 0.5
-    sprint: 2
-    air: 0.85
-    keys: []
+  canRun: 1
+  runSpeed: 9
+  runningKey: 304
+  _rb: {fileID: 54063890643546284}
+  _playerCollider: {fileID: 136877096903737240}
+  _projectileSpawnPoint: {fileID: 6752312590386951868}
+  _spawnPoint: {fileID: 0}
+  groundCheck: {fileID: 114503055206606986}
+  enableClientPrediction: 1
+  positionSnapThreshold: 1
+  positionSoftThreshold: 0.15
+  positionLerpSpeed: 10
+  rotationLerpSpeed: 15
+  verticalSoftLerpSpeed: 5
+  groundSnapDistance: 0.25
+  groundCheckRadius: 0.25
+  groundLayers:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  gravity: -9.81
+  jumpVelocity: 5
+  prefabPhysxBall:
+    RawGuidValue: fe9cfb2a817eec849a68d23e80e39162
+  prefabDroppedBall:
+    RawGuidValue: 1578ac623d14a684f91db5b09466442b
+  prefabLobbedBall:
+    RawGuidValue: f81f273ab63742e49b89d4054f1fca08
+  _spawnedProjectileCounter: 0
 --- !u!114 &114497868231759342
 MonoBehaviour:
   m_ObjectHideFlags: 0

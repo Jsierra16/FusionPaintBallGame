@@ -1036,6 +1036,7 @@ MonoBehaviour:
   weaponIndicator: {fileID: 1235511563}
   weaponIndicatorPrefix: 'Weapon: '
   connectionStatusText: {fileID: 0}
+  useAutoHostOrClient: 1
   SessionName: TestRoom
 --- !u!4 &955933381
 Transform:
